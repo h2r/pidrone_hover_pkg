@@ -3,6 +3,7 @@ import tf
 import math
 from visualization_msgs.msg import Marker, MarkerArray
 from pid_class import PID
+from student_pid_class import student_PID
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import Range
 from std_msgs.msg import String
@@ -15,11 +16,13 @@ import time
 import sys
 import signal
 
+import yaml
+
 # stefie10: High-level comments: 1) Make a class 2) put everything
 # inside a main method and 3) no global variables.
 
 landing_threshold = 9.
-initial_set_z = 30.0
+initial_set_z = 0.13
 set_z = initial_set_z
 init_z = 0
 smoothed_vel = np.array([0, 0, 0])
@@ -49,6 +52,8 @@ mw_angle_coeff = 10.0
 
 flow_x_old = 0.0
 flow_y_old = 0.0
+
+throttle_pid = None
 
 def arm():
     global cmds
@@ -134,7 +139,7 @@ path = rospack.get_path('pidrone_pkg')
 f = open("%s/params/multiwii.yaml" % path)
 means = yaml.load(f)
 f.close()
-print "means", means
+#print "means", means
 accRawToMss = 9.8 / means["az"]
 accZeroX = means["ax"] * accRawToMss
 accZeroY = means["ay"] * accRawToMss
@@ -143,7 +148,7 @@ accZeroZ = means["az"] * accRawToMss
 
 def publishRos(board, imupub, markerpub, markerarraypub, statepub):
     state = State()
-    state.vbat = board.analog['vbat']
+    state.vbat = board.analog['vbat'] * 0.10
     state.amperage = board.analog['amperage']
     statepub.publish(state)
     
@@ -233,7 +238,7 @@ def fly(velocity_cmd):
 #           pid.pitch._i += velocity_cmd.y_i * scalar
             if set_z + velocity_cmd.z_velocity > 0.0 and set_z + velocity_cmd.z_velocity < 49.0:
                 set_z += velocity_cmd.z_velocity
-            print "set_z", set_z, "cmd.z_velocity", velocity_cmd.z_velocity
+            # print "set_z", set_z, "cmd.z_velocity", velocity_cmd.z_velocity
 
 def kill_throttle():
     pass
@@ -278,6 +283,7 @@ def mode_callback(data):
 
 
 def ultra_callback(data):
+    global throttle_pid
     global ultra_z, flow_height_z
     global pid
     global first
@@ -299,38 +305,18 @@ def ultra_callback(data):
         try:
             if current_mode == 5 or current_mode == 3 or current_mode == 2:
                 if first:
-                    #init_z = ultra_z
                     first = False
                 else:
                     error.z.err = init_z - ultra_z + set_z
                     # print "setting cmds"
                     cmds = pid.step(error, cmd_velocity, cmd_yaw_velocity)
+# NEEDED FOR PROJECT 2
+                    cmds[3] = throttle_pid.step(-error.z.err, rospy.get_time())
+                    print cmds
+# END NEED
         except Exception as e:
             land()
             raise
-
-def vrpn_callback(data):
-    global ultra_z, flow_height_z
-    global pid
-    global first
-    global init_z
-    global cmds
-    global current_mode
-    # scale ultrasonic reading to get z accounting for tilt of the drone
-    ultra_z = data.pose.position.z
-    # print 'ultra_z', ultra_z
-    try:
-        if current_mode == 5:
-            if first:
-                #init_z = ultra_z
-                first = False
-            else:
-                error.z.err = init_z - ultra_z + set_z
-                # print "setting cmds"
-                cmds = pid.step(error)
-    except Exception as e:
-        land()
-        raise
 
 # stefie10: as we discussed, these globals are UGH.  Make this a
 # method on a class, replace all the global calls with "self.error",
@@ -362,6 +348,20 @@ def ctrl_c_handler(signal, frame):
 
 
 if __name__ == '__main__':
+# Load YAML
+    pid_terms = []
+    with open("z_pid.yaml", 'r') as stream:
+        try:
+            yaml_data = yaml.safe_load(stream)
+            print yaml_data
+            pid_terms = [yaml_data['Kp'],yaml_data['Ki'],yaml_data['Kd'],yaml_data['K']]
+        except yaml.YAMLError as exc:
+            print exc
+            print 'Failed to load PID terms! Exiting.'
+            sys.exit(1)
+    global throttle_pid
+    throttle_pid = student_PID(pid_terms[0], pid_terms[1], pid_terms[2].  [pid_terms[3]])
+
     # stefie10: PUt all this code in a main() method.  The globals
     # should be fields in a class for the controller, as should all
     # the callbacks.
@@ -371,7 +371,6 @@ if __name__ == '__main__':
     rospy.Subscriber("/pidrone/plane_err", axes_err, plane_callback)
     board = MultiWii("/dev/ttyUSB0")
     rospy.Subscriber("/pidrone/infrared", Range, ultra_callback)
-    rospy.Subscriber("/pidrone/vrpn_pos", PoseStamped, vrpn_callback)
     rospy.Subscriber("/pidrone/set_mode_vel", Mode, mode_callback)
     rospy.Subscriber("/pidrone/heartbeat", String, heartbeat_callback)
     global last_heartbeat
@@ -462,15 +461,4 @@ if __name__ == '__main__':
         time.sleep(0.01)
 
     print "Shutdown Recieved"
-    # stefie10: I think below is a straight-up bug, because it should
-    # just disarm after exiting.  This will only actually do anything
-    # if it is still looping, because after the drone shuts down, it
-    # won't send any more PID signals.
-    land()
-    # board.disarm()
-
-    # stefie10: No need to call sys.exit when returning from main, it
-    # will happen by itself, delete this line of code.
-    sys.exit()
-
-
+    board.disarm()
